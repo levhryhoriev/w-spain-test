@@ -1,0 +1,19 @@
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    level: max
+    paths:
+        - app
+        - bootstrap
+        - config
+        - database
+        - routes
+        - tests
+    excludePaths:
+        analyse:
+            - bootstrap/cache
+    phpVersion: 80500
+    tmpDir: storage/framework/cache/phpstan
+    reportUnmatchedIgnoredErrors: true
+

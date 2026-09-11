@@ -1,0 +1,222 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      APP_UID: ${APP_UID:-1000}
+      APP_GID: ${APP_GID:-1000}
+  image: laravel-housing-api:php-8.5.10
+  working_dir: /var/www/html
+  volumes:
+    - ./:/var/www/html
+    - composer-cache:/tmp/composer/cache
+  networks:
+    - application
+  environment: &app-environment
+    APP_ENV: ${APP_ENV:-local}
+    APP_DEBUG: ${APP_DEBUG:-true}
+    DB_CONNECTION: mysql
+    DB_HOST: mysql
+    DB_PORT: 3306
+    DB_DATABASE: ${DB_DATABASE:-laravel}
+    DB_USERNAME: ${DB_USERNAME:-laravel}
+    DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    REDIS_CLIENT: phpredis
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    QUEUE_CONNECTION: redis
+
+services:
+  app:
+    <<: *app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect 127.0.0.1:9000 2>/dev/null | grep -q pong
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  nginx:
+    image: nginx:1.30.4-alpine3.24-slim
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - target: 80
+        published: ${APP_PORT:-8080}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - ./:/var/www/html:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - application
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --quiet --spider http://127.0.0.1/nginx-health
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  mysql:
+    image: mysql:8.4.11
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-laravel}
+      MYSQL_USER: ${DB_USERNAME:-laravel}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - application
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}" mysqladmin ping --host=127.0.0.1 --user=root --silent
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    image: redis:8.10.1-trixie
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+    volumes:
+      - redis-data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - application
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  worker:
+    <<: *app
+    command:
+      - php
+      - artisan
+      - horizon
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      - worker
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 120s
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - artisan
+        - horizon:status
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  node:
+    image: node:24.20.0-alpine3.24
+    working_dir: /var/www/html
+    user: ${APP_UID:-1000}:${APP_GID:-1000}
+    command:
+      - npm
+      - run
+      - dev
+      - --
+      - --host
+      - 0.0.0.0
+    ports:
+      - target: 5173
+        published: ${VITE_PORT:-5173}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - ./:/var/www/html
+    networks:
+      - application
+    profiles:
+      - frontend
+
+  mysql-test:
+    image: mysql:8.4.11
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: laravel_test
+    tmpfs:
+      - /var/lib/mysql
+    networks:
+      - testing
+    profiles:
+      - test
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping --host=127.0.0.1 --user=root --silent
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  tests:
+    <<: *app
+    command:
+      - php
+      - artisan
+      - test
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+    networks:
+      - testing
+    profiles:
+      - test
+    environment:
+      <<: *app-environment
+      APP_ENV: testing
+      APP_DEBUG: "false"
+      CACHE_STORE: array
+      DB_HOST: mysql-test
+      DB_DATABASE: laravel_test
+      DB_USERNAME: root
+      DB_PASSWORD: ""
+      QUEUE_CONNECTION: sync
+      SESSION_DRIVER: array
+
+networks:
+  application:
+  testing:
+
+volumes:
+  composer-cache:
+  mysql-data:
+  redis-data:
